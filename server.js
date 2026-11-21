@@ -38,17 +38,19 @@ app.post("/convert-spotify", async (req, res) => {
     console.log("Resolved Spotify track:", trackTitle);
 
     const safeFilename = trackTitle.replace(/[^a-z0-9_-]/gi, "_").replace(/_+/g, "_") || "spotify_track";
-    const searchQuery = `ytsearch1:${trackTitle} audio`;
+    const searchQuery = `ytsearch1:${trackTitle}`;
 
     const ytdlp = spawn("yt-dlp", [
-      "-f", "bestaudio",
+      "-f", "ba/b",
       "--no-playlist",
+      "--no-warnings",
       "-o", "-",
       searchQuery
     ]);
 
     const ffmpeg = spawn("ffmpeg", [
       "-threads", "1",
+      "-loglevel", "error",
       "-i", "pipe:0",
       "-vn",
       "-c:a", "aac",
@@ -62,6 +64,7 @@ app.post("/convert-spotify", async (req, res) => {
 
     let ytdlpErr = "";
     let ffmpegErr = "";
+    let ytdlpBytes = 0;
     let bytesSent = 0;
     let headersSet = false;
     let finished = false;
@@ -74,6 +77,10 @@ app.post("/convert-spotify", async (req, res) => {
     ffmpeg.stderr.on("data", (chunk) => {
       ffmpegErr += chunk.toString();
       if (ffmpegErr.length > 4000) ffmpegErr = ffmpegErr.slice(-4000);
+    });
+
+    ytdlp.stdout.on("data", (chunk) => {
+      ytdlpBytes += chunk.length;
     });
 
     ytdlp.stdout.on("error", () => {
@@ -95,10 +102,14 @@ app.post("/convert-spotify", async (req, res) => {
 
     ffmpeg.on("close", (code, signal) => {
       finished = true;
-      console.log(`ffmpeg closed: code=${code}, signal=${signal}, bytesSent=${bytesSent}`);
+      console.log(`ffmpeg closed: code=${code}, signal=${signal}, ytdlpBytes=${ytdlpBytes}, bytesSent=${bytesSent}`);
       if ((code !== 0 || bytesSent === 0) && !headersSet && !res.headersSent) {
-        const combined = (ytdlpErr + "\n" + ffmpegErr).trim().split("\n").filter(Boolean);
-        const detail = combined.slice(-3).join(" | ") || `code ${code}, signal ${signal || "none"}`;
+        const ytLines = ytdlpErr.trim().split("\n").map((l) => l.trim()).filter(Boolean);
+        const ffLines = ffmpegErr.trim().split("\n").map((l) => l.trim()).filter(Boolean);
+        const detail =
+          ytLines.slice(-2).join(" | ") ||
+          ffLines.slice(-2).join(" | ") ||
+          `yt-dlp sent ${ytdlpBytes} bytes, ffmpeg code=${code}, signal=${signal || "none"}`;
         return res.status(400).json({ error: `Conversion failed: ${detail}` });
       }
       if (!res.writableEnded) {
