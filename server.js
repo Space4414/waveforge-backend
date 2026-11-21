@@ -16,9 +16,9 @@ app.get("/health", (_req, res) => {
 });
 
 app.post("/convert", (req, res) => {
-  const { sourceUrl, bitrate = "256k", title = "waveforge_track" } = req.body || {};
+  const { sourceUrl, bitrate = "128k", title = "waveforge_track" } = req.body || {};
   const allowedBitrates = ["128k", "256k", "320k"];
-  const safeBitrate = allowedBitrates.includes(bitrate) ? bitrate : "256k";
+  const safeBitrate = allowedBitrates.includes(bitrate) ? bitrate : "128k";
 
   if (!sourceUrl || !/^https?:\/\//i.test(sourceUrl)) {
     return res.status(400).json({ error: "Provide a valid http/https direct audio sourceUrl" });
@@ -27,8 +27,8 @@ app.post("/convert", (req, res) => {
   const safeName = String(title).replace(/[^a-z0-9_-]/gi, "_") || "waveforge_track";
 
   const ffmpeg = spawn("ffmpeg", [
-    "-user_agent", "Mozilla/5.0 (Linux; Android 13; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36",
-    "-headers", "Accept: */*\r\n",
+    "-threads", "1",
+    "-user_agent", "WaveForge/1.0 (Personal Transcoder)",
     "-i", sourceUrl,
     "-vn",
     "-c:a", "aac",
@@ -70,11 +70,11 @@ app.post("/convert", (req, res) => {
     }
   });
 
-  ffmpeg.on("close", (code) => {
+  ffmpeg.on("close", (code, signal) => {
     if (code !== 0 || bytesSent === 0) {
       if (!headersSet && !res.headersSent) {
         const lines = stderrLog.trim().split("\n").map((l) => l.trim()).filter(Boolean);
-        const detail = lines.slice(-2).join(" | ") || `exit code ${code}`;
+        const detail = lines.slice(-2).join(" | ") || `code ${code}, signal ${signal || "none"}`;
         return res.status(400).json({ error: `ffmpeg failed: ${detail}` });
       }
     }
