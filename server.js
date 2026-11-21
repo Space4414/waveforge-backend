@@ -3,7 +3,6 @@ import cors from "cors";
 import { spawn } from "child_process";
 
 const app = express();
-
 app.use(cors({ origin: process.env.ALLOWED_ORIGIN || "*" }));
 app.use(express.json());
 
@@ -15,88 +14,110 @@ app.get("/health", (_req, res) => {
   res.json({ service: "waveforge-backend", status: "ok" });
 });
 
-app.post("/convert", (req, res) => {
-  const { sourceUrl, bitrate = "128k", title = "waveforge_track" } = req.body || {};
+async function getSpotifyMetadata(spotifyUrl) {
+  const oembedUrl = `https://open.spotify.com/oembed?url=${encodeURIComponent(spotifyUrl)}`;
+  const response = await fetch(oembedUrl);
+  if (!response.ok) {
+    throw new Error("Could not fetch Spotify track metadata. Check that the link is a public track.");
+  }
+  const data = await response.json();
+  return data.title || "Unknown Track";
+}
+
+app.post("/convert-spotify", async (req, res) => {
+  const { spotifyUrl, bitrate = "128k" } = req.body || {};
   const allowedBitrates = ["128k", "256k", "320k"];
   const safeBitrate = allowedBitrates.includes(bitrate) ? bitrate : "128k";
 
-  console.log("POST /convert received:", sourceUrl, safeBitrate);
-
-  if (!sourceUrl || !/^https?:\/\//i.test(sourceUrl)) {
-    return res.status(400).json({ error: "Provide a valid http/https direct audio sourceUrl" });
+  if (!spotifyUrl || !/open\.spotify\.com\/(intl-[a-z]{2}\/)?track\//i.test(spotifyUrl)) {
+    return res.status(400).json({ error: "Provide a valid Spotify track URL (open.spotify.com/track/...)." });
   }
 
-  const safeName = String(title).replace(/[^a-z0-9_-]/gi, "_") || "waveforge_track";
+  try {
+    const trackTitle = await getSpotifyMetadata(spotifyUrl);
+    console.log("Resolved Spotify track:", trackTitle);
 
-  const ffmpeg = spawn("ffmpeg", [
-    "-threads", "1",
-    "-user_agent", "Mozilla/5.0 (Linux; Android 13; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36",
-    "-headers", "Accept: */*\r\n",
-    "-i", sourceUrl,
-    "-vn",
-    "-c:a", "aac",
-    "-b:a", safeBitrate,
-    "-f", "mp4",
-    "-movflags", "frag_keyframe+empty_moov",
-    "pipe:1"
-  ]);
+    const safeFilename = trackTitle.replace(/[^a-z0-9_-]/gi, "_").replace(/_+/g, "_") || "spotify_track";
+    const searchQuery = `ytsearch1:${trackTitle} audio`;
 
-  let stderrLog = "";
-  let bytesSent = 0;
-  let headersSet = false;
-  let finished = false;
+    const ytdlp = spawn("yt-dlp", [
+      "-f", "bestaudio",
+      "--no-playlist",
+      "-o", "-",
+      searchQuery
+    ]);
 
-  ffmpeg.stderr.on("data", (chunk) => {
-    stderrLog += chunk.toString();
-    if (stderrLog.length > 6000) {
-      stderrLog = stderrLog.slice(-6000);
-    }
-  });
+    const ffmpeg = spawn("ffmpeg", [
+      "-threads", "1",
+      "-i", "pipe:0",
+      "-vn",
+      "-c:a", "aac",
+      "-b:a", safeBitrate,
+      "-f", "mp4",
+      "-movflags", "frag_keyframe+empty_moov",
+      "pipe:1"
+    ]);
 
-  ffmpeg.stdout.on("data", (chunk) => {
-    if (!headersSet) {
-      headersSet = true;
-      res.setHeader("Content-Type", "audio/mp4");
-      res.setHeader("Content-Disposition", `attachment; filename="${safeName}.m4a"`);
-    }
-    bytesSent += chunk.length;
-    if (!res.write(chunk)) {
-      ffmpeg.stdout.pause();
-      res.once("drain", () => ffmpeg.stdout.resume());
-    }
-  });
+    ytdlp.stdout.pipe(ffmpeg.stdin);
 
-  ffmpeg.on("error", (err) => {
-    finished = true;
-    console.error("ffmpeg spawn error:", err.message);
-    if (!headersSet && !res.headersSent) {
-      res.status(500).json({ error: `Failed to start ffmpeg: ${err.message}` });
-    } else if (!res.writableEnded) {
-      res.end();
-    }
-  });
+    let ytdlpErr = "";
+    let ffmpegErr = "";
+    let bytesSent = 0;
+    let headersSet = false;
+    let finished = false;
 
-  ffmpeg.on("close", (code, signal) => {
-    finished = true;
-    console.log(`ffmpeg closed: code=${code}, signal=${signal}, bytesSent=${bytesSent}`);
-    if (code !== 0 || bytesSent === 0) {
-      if (!headersSet && !res.headersSent) {
-        const lines = stderrLog.trim().split("\n").map((l) => l.trim()).filter(Boolean);
-        const detail = lines.slice(-2).join(" | ") || `code ${code}, signal ${signal || "none"}`;
-        return res.status(400).json({ error: `ffmpeg failed: ${detail}` });
+    ytdlp.stderr.on("data", (chunk) => {
+      ytdlpErr += chunk.toString();
+      if (ytdlpErr.length > 4000) ytdlpErr = ytdlpErr.slice(-4000);
+    });
+
+    ffmpeg.stderr.on("data", (chunk) => {
+      ffmpegErr += chunk.toString();
+      if (ffmpegErr.length > 4000) ffmpegErr = ffmpegErr.slice(-4000);
+    });
+
+    ytdlp.stdout.on("error", () => {
+      try { ffmpeg.stdin.destroy(); } catch {}
+    });
+
+    ffmpeg.stdout.on("data", (chunk) => {
+      if (!headersSet) {
+        headersSet = true;
+        res.setHeader("Content-Type", "audio/mp4");
+        res.setHeader("Content-Disposition", `attachment; filename="${safeFilename}.m4a"`);
       }
-    }
-    if (!res.writableEnded) {
-      res.end();
-    }
-  });
+      bytesSent += chunk.length;
+      if (!res.write(chunk)) {
+        ffmpeg.stdout.pause();
+        res.once("drain", () => ffmpeg.stdout.resume());
+      }
+    });
 
-  req.on("aborted", () => {
-    if (!finished) {
-      console.log("Client aborted request; stopping ffmpeg");
-      ffmpeg.kill("SIGTERM");
+    ffmpeg.on("close", (code, signal) => {
+      finished = true;
+      console.log(`ffmpeg closed: code=${code}, signal=${signal}, bytesSent=${bytesSent}`);
+      if ((code !== 0 || bytesSent === 0) && !headersSet && !res.headersSent) {
+        const combined = (ytdlpErr + "\n" + ffmpegErr).trim().split("\n").filter(Boolean);
+        const detail = combined.slice(-3).join(" | ") || `code ${code}, signal ${signal || "none"}`;
+        return res.status(400).json({ error: `Conversion failed: ${detail}` });
+      }
+      if (!res.writableEnded) {
+        res.end();
+      }
+    });
+
+    req.on("aborted", () => {
+      if (!finished) {
+        ytdlp.kill("SIGTERM");
+        ffmpeg.kill("SIGTERM");
+      }
+    });
+  } catch (err) {
+    console.error("Spotify convert error:", err);
+    if (!res.headersSent) {
+      res.status(400).json({ error: err.message });
     }
-  });
+  }
 });
 
 const port = process.env.PORT || 3000;
