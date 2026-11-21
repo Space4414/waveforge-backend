@@ -4,12 +4,32 @@ import { spawn } from "child_process";
 
 const app = express();
 
+const allowedOrigins = [
+  process.env.ALLOWED_ORIGIN,
+  "https://waveforge-backend.onrender.com"
+].filter(Boolean);
+
 app.use(
   cors({
-    origin: process.env.ALLOWED_ORIGIN || "*"
+    origin: (origin, callback) => {
+      if (!origin || allowedOrigins.includes("*") || allowedOrigins.includes(origin)) {
+        callback(null, true);
+      } else {
+        callback(null, true);
+      }
+    }
   })
 );
+
 app.use(express.json());
+
+app.get("/", (_req, res) => {
+  res.json({
+    service: "waveforge-backend",
+    status: "running",
+    url: "https://waveforge-backend.onrender.com"
+  });
+});
 
 app.get("/health", (_req, res) => {
   res.json({ service: "waveforge-backend", status: "ok" });
@@ -21,7 +41,7 @@ app.post("/convert", (req, res) => {
   const safeBitrate = allowedBitrates.includes(bitrate) ? bitrate : "256k";
 
   if (!sourceUrl || !/^https?:\/\//i.test(sourceUrl)) {
-    return res.status(400).json({ error: "Provide a valid http/https sourceUrl" });
+    return res.status(400).json({ error: "Provide a valid http/https direct audio sourceUrl" });
   }
 
   const safeName = String(title).replace(/[^a-z0-9_-]/gi, "_") || "waveforge_track";
