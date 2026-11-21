@@ -26,10 +26,8 @@ app.post("/convert", (req, res) => {
 
   const safeName = String(title).replace(/[^a-z0-9_-]/gi, "_") || "waveforge_track";
 
-  res.setHeader("Content-Type", "audio/mp4");
-  res.setHeader("Content-Disposition", `attachment; filename="${safeName}.m4a"`);
-
   const ffmpeg = spawn("ffmpeg", [
+    "-user_agent", "Mozilla/5.0",
     "-i", sourceUrl,
     "-vn",
     "-c:a", "aac",
@@ -39,17 +37,47 @@ app.post("/convert", (req, res) => {
     "pipe:1"
   ]);
 
-  ffmpeg.stdout.pipe(res);
+  let stderrLog = "";
+  let bytesSent = 0;
+  let headersSet = false;
 
-  ffmpeg.on("error", () => {
-    if (!res.headersSent) {
-      res.status(500).json({ error: "ffmpeg failed to start" });
+  ffmpeg.stderr.on("data", (chunk) => {
+    stderrLog += chunk.toString();
+    if (stderrLog.length > 4000) {
+      stderrLog = stderrLog.slice(-4000);
+    }
+  });
+
+  ffmpeg.stdout.on("data", (chunk) => {
+    if (!headersSet) {
+      headersSet = true;
+      res.setHeader("Content-Type", "audio/mp4");
+      res.setHeader("Content-Disposition", `attachment; filename="${safeName}.m4a"`);
+    }
+    bytesSent += chunk.length;
+    if (!res.write(chunk)) {
+      ffmpeg.stdout.pause();
+      res.once("drain", () => ffmpeg.stdout.resume());
+    }
+  });
+
+  ffmpeg.on("error", (err) => {
+    if (!headersSet && !res.headersSent) {
+      res.status(500).json({ error: `Failed to start ffmpeg: ${err.message}` });
+    } else if (!res.writableEnded) {
+      res.end();
     }
   });
 
   ffmpeg.on("close", (code) => {
-    if (code !== 0 && !res.headersSent) {
-      res.status(500).json({ error: "Audio conversion failed" });
+    if (code !== 0 || bytesSent === 0) {
+      if (!headersSet && !res.headersSent) {
+        const lastLine = stderrLog.trim().split("\n").pop() || "ffmpeg exited with an error";
+        return res.status(400).json({ error: `Conversion failed: ${lastLine}` });
+      }
+    }
+    if (!res.writableEnded) {
+      res.end();
     }
   });
 
