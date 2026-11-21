@@ -1,10 +1,21 @@
 import express from "express";
 import cors from "cors";
+import fs from "fs";
 import { spawn } from "child_process";
 
 const app = express();
 app.use(cors({ origin: process.env.ALLOWED_ORIGIN || "*" }));
 app.use(express.json());
+
+const COOKIES_PATH = "/tmp/cookies.txt";
+
+function ensureCookiesFile() {
+  if (process.env.YTDLP_COOKIES && process.env.YTDLP_COOKIES.trim().length > 0) {
+    fs.writeFileSync(COOKIES_PATH, process.env.YTDLP_COOKIES, "utf8");
+    return fs.existsSync(COOKIES_PATH);
+  }
+  return false;
+}
 
 app.get("/", (_req, res) => {
   res.json({ service: "waveforge-backend", status: "running" });
@@ -39,14 +50,18 @@ app.post("/convert-spotify", async (req, res) => {
 
     const safeFilename = trackTitle.replace(/[^a-z0-9_-]/gi, "_").replace(/_+/g, "_") || "spotify_track";
     const searchQuery = `ytsearch1:${trackTitle}`;
+    const hasCookies = ensureCookiesFile();
 
-    const ytdlp = spawn("yt-dlp", [
+    const ytdlpArgs = [
+      ...(hasCookies ? ["--cookies", COOKIES_PATH] : []),
       "-f", "ba/b",
       "--no-playlist",
       "--no-warnings",
       "-o", "-",
       searchQuery
-    ]);
+    ];
+
+    const ytdlp = spawn("yt-dlp", ytdlpArgs);
 
     const ffmpeg = spawn("ffmpeg", [
       "-threads", "1",
