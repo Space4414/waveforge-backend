@@ -3,7 +3,6 @@ FROM node:20-slim
 ENV NODE_ENV=production
 ENV PYTHONUNBUFFERED=1
 
-# Install system dependencies, ffmpeg, python3, and yt-dlp
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     python3 \
@@ -17,13 +16,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# Install Node dependencies first for better layer caching
 COPY package*.json ./
 RUN npm ci --omit=dev || npm install --omit=dev
 
-# Copy application source
 COPY . .
 
 EXPOSE 3000
 
-CMD ["node", "server.js"]
+CMD ["sh", "-c", "yt-dlp -U || true; exec node server.js"]
