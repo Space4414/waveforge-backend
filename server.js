@@ -24,6 +24,45 @@ async function getSpotifyMetadata(spotifyUrl) {
   return data.title || "Unknown Track";
 }
 
+async function findArchiveAudioUrl(trackTitle) {
+  const cleanedQuery = trackTitle.replace(/[^\w\s-]/g, " ").trim();
+  const q = encodeURIComponent(`(${cleanedQuery}) AND mediatype:(audio)`);
+  const searchUrl = `https://archive.org/advancedsearch.php?q=${q}&fl[]=identifier&rows=5&page=1&output=json`;
+
+  const searchRes = await fetch(searchUrl, {
+    headers: { "User-Agent": "WaveForge/1.0 (spotiaac.vercel.app)" }
+  });
+  if (!searchRes.ok) {
+    throw new Error("Failed to search Internet Archive audio catalog.");
+  }
+
+  const searchData = await searchRes.json();
+  const docs = searchData?.response?.docs || [];
+  const audioExts = [".m4a", ".mp3", ".ogg", ".opus", ".flac", ".wav"];
+
+  for (const doc of docs) {
+    const id = doc.identifier;
+    if (!id) continue;
+    const metaRes = await fetch(`https://archive.org/metadata/${encodeURIComponent(id)}/files`, {
+      headers: { "User-Agent": "WaveForge/1.0 (spotiaac.vercel.app)" }
+    });
+    if (!metaRes.ok) continue;
+    const metaData = await metaRes.json();
+    const files = metaData?.result || [];
+
+    const match = files.find((f) => {
+      const name = (f.name || "").toLowerCase();
+      return audioExts.some((ext) => name.endsWith(ext));
+    });
+
+    if (match?.name) {
+      return `https://archive.org/download/${encodeURIComponent(id)}/${encodeURIComponent(match.name)}`;
+    }
+  }
+
+  throw new Error(`No streamable audio match found on Internet Archive for "${trackTitle}".`);
+}
+
 app.post("/convert-spotify", async (req, res) => {
   const { spotifyUrl, bitrate = "128k" } = req.body || {};
   const allowedBitrates = ["128k", "256k", "320k"];
@@ -37,17 +76,17 @@ app.post("/convert-spotify", async (req, res) => {
     const trackTitle = await getSpotifyMetadata(spotifyUrl);
     console.log("Resolved Spotify track:", trackTitle);
 
+    const audioUrl = await findArchiveAudioUrl(trackTitle);
+    console.log("Streaming source audio:", audioUrl);
+
+    const audioRes = await fetch(audioUrl, {
+      headers: { "User-Agent": "WaveForge/1.0 (spotiaac.vercel.app)" }
+    });
+    if (!audioRes.ok || !audioRes.body) {
+      throw new Error("Could not stream audio file from source.");
+    }
+
     const safeFilename = trackTitle.replace(/[^a-z0-9_-]/gi, "_").replace(/_+/g, "_") || "spotify_track";
-    const searchQuery = `scsearch1:${trackTitle}`;
-
-    const ytdlpArgs = [
-      "--no-playlist",
-      "--no-warnings",
-      "-o", "-",
-      searchQuery
-    ];
-
-    const ytdlp = spawn("yt-dlp", ytdlpArgs);
 
     const ffmpeg = spawn("ffmpeg", [
       "-threads", "1",
@@ -61,31 +100,14 @@ app.post("/convert-spotify", async (req, res) => {
       "pipe:1"
     ]);
 
-    ytdlp.stdout.pipe(ffmpeg.stdin);
-
-    let ytdlpErr = "";
     let ffmpegErr = "";
-    let ytdlpBytes = 0;
     let bytesSent = 0;
     let headersSet = false;
     let finished = false;
 
-    ytdlp.stderr.on("data", (chunk) => {
-      ytdlpErr += chunk.toString();
-      if (ytdlpErr.length > 4000) ytdlpErr = ytdlpErr.slice(-4000);
-    });
-
     ffmpeg.stderr.on("data", (chunk) => {
       ffmpegErr += chunk.toString();
       if (ffmpegErr.length > 4000) ffmpegErr = ffmpegErr.slice(-4000);
-    });
-
-    ytdlp.stdout.on("data", (chunk) => {
-      ytdlpBytes += chunk.length;
-    });
-
-    ytdlp.stdout.on("error", () => {
-      try { ffmpeg.stdin.destroy(); } catch {}
     });
 
     ffmpeg.stdout.on("data", (chunk) => {
@@ -103,14 +125,10 @@ app.post("/convert-spotify", async (req, res) => {
 
     ffmpeg.on("close", (code, signal) => {
       finished = true;
-      console.log(`ffmpeg closed: code=${code}, signal=${signal}, ytdlpBytes=${ytdlpBytes}, bytesSent=${bytesSent}`);
+      console.log(`ffmpeg closed: code=${code}, signal=${signal}, bytesSent=${bytesSent}`);
       if ((code !== 0 || bytesSent === 0) && !headersSet && !res.headersSent) {
-        const ytLines = ytdlpErr.trim().split("\n").map((l) => l.trim()).filter(Boolean);
         const ffLines = ffmpegErr.trim().split("\n").map((l) => l.trim()).filter(Boolean);
-        const detail =
-          ytLines.slice(-2).join(" | ") ||
-          ffLines.slice(-2).join(" | ") ||
-          `yt-dlp sent ${ytdlpBytes} bytes, ffmpeg code=${code}, signal=${signal || "none"}`;
+        const detail = ffLines.slice(-2).join(" | ") || `ffmpeg code=${code}, signal=${signal || "none"}`;
         return res.status(400).json({ error: `Conversion failed: ${detail}` });
       }
       if (!res.writableEnded) {
@@ -118,9 +136,29 @@ app.post("/convert-spotify", async (req, res) => {
       }
     });
 
+    const reader = audioRes.body.getReader();
+    (async () => {
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (ffmpeg.stdin.writable) {
+            const ok = ffmpeg.stdin.write(Buffer.from(value));
+            if (!ok) {
+              await new Promise((resolve) => ffmpeg.stdin.once("drain", resolve));
+            }
+          }
+        }
+        if (ffmpeg.stdin.writable) ffmpeg.stdin.end();
+      } catch (streamErr) {
+        console.error("Audio stream pipe error:", streamErr);
+        try { ffmpeg.stdin.destroy(); } catch {}
+      }
+    })();
+
     req.on("aborted", () => {
       if (!finished) {
-        ytdlp.kill("SIGTERM");
+        try { reader.cancel(); } catch {}
         ffmpeg.kill("SIGTERM");
       }
     });
