@@ -4,31 +4,11 @@ import { spawn } from "child_process";
 
 const app = express();
 
-const allowedOrigins = [
-  process.env.ALLOWED_ORIGIN,
-  "https://waveforge-backend.onrender.com"
-].filter(Boolean);
-
-app.use(
-  cors({
-    origin: (origin, callback) => {
-      if (!origin || allowedOrigins.includes("*") || allowedOrigins.includes(origin)) {
-        callback(null, true);
-      } else {
-        callback(null, true);
-      }
-    }
-  })
-);
-
+app.use(cors({ origin: process.env.ALLOWED_ORIGIN || "*" }));
 app.use(express.json());
 
 app.get("/", (_req, res) => {
-  res.json({
-    service: "waveforge-backend",
-    status: "running",
-    url: "https://waveforge-backend.onrender.com"
-  });
+  res.json({ service: "waveforge-backend", status: "running" });
 });
 
 app.get("/health", (_req, res) => {
@@ -47,7 +27,8 @@ app.post("/convert", (req, res) => {
   const safeName = String(title).replace(/[^a-z0-9_-]/gi, "_") || "waveforge_track";
 
   const ffmpeg = spawn("ffmpeg", [
-    "-user_agent", "Mozilla/5.0",
+    "-user_agent", "Mozilla/5.0 (Linux; Android 13; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36",
+    "-headers", "Accept: */*\r\n",
     "-i", sourceUrl,
     "-vn",
     "-c:a", "aac",
@@ -63,8 +44,8 @@ app.post("/convert", (req, res) => {
 
   ffmpeg.stderr.on("data", (chunk) => {
     stderrLog += chunk.toString();
-    if (stderrLog.length > 4000) {
-      stderrLog = stderrLog.slice(-4000);
+    if (stderrLog.length > 6000) {
+      stderrLog = stderrLog.slice(-6000);
     }
   });
 
@@ -92,8 +73,9 @@ app.post("/convert", (req, res) => {
   ffmpeg.on("close", (code) => {
     if (code !== 0 || bytesSent === 0) {
       if (!headersSet && !res.headersSent) {
-        const lastLine = stderrLog.trim().split("\n").pop() || "ffmpeg exited with an error";
-        return res.status(400).json({ error: `Conversion failed: ${lastLine}` });
+        const lines = stderrLog.trim().split("\n").map((l) => l.trim()).filter(Boolean);
+        const detail = lines.slice(-2).join(" | ") || `exit code ${code}`;
+        return res.status(400).json({ error: `ffmpeg failed: ${detail}` });
       }
     }
     if (!res.writableEnded) {
