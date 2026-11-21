@@ -54,7 +54,6 @@ app.post("/convert-spotify", async (req, res) => {
 
     const ytdlpArgs = [
       ...(hasCookies ? ["--cookies", COOKIES_PATH] : []),
-      "-f", "ba/b",
       "--no-playlist",
       "--no-warnings",
       "-o", "-",
