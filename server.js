@@ -54,8 +54,7 @@ app.post("/convert-spotify", async (req, res) => {
 
     const ytdlpArgs = [
       ...(hasCookies ? ["--cookies", COOKIES_PATH] : []),
-      "--extractor-args", "youtube:player_client=mweb,tv_embedded",
-      "-f", "best",
+      "--extractor-args", "youtube:player_client=mweb,tv_embedded,android",
       "--no-playlist",
       "--no-warnings",
       "-o", "-",
