@@ -28,7 +28,8 @@ app.post("/convert", (req, res) => {
 
   const ffmpeg = spawn("ffmpeg", [
     "-threads", "1",
-    "-user_agent", "WaveForge/1.0 (Personal Transcoder)",
+    "-user_agent", "Mozilla/5.0 (Linux; Android 13; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36",
+    "-headers", "Accept: */*\r\n",
     "-i", sourceUrl,
     "-vn",
     "-c:a", "aac",
@@ -41,6 +42,7 @@ app.post("/convert", (req, res) => {
   let stderrLog = "";
   let bytesSent = 0;
   let headersSet = false;
+  let finished = false;
 
   ffmpeg.stderr.on("data", (chunk) => {
     stderrLog += chunk.toString();
@@ -63,6 +65,7 @@ app.post("/convert", (req, res) => {
   });
 
   ffmpeg.on("error", (err) => {
+    finished = true;
     if (!headersSet && !res.headersSent) {
       res.status(500).json({ error: `Failed to start ffmpeg: ${err.message}` });
     } else if (!res.writableEnded) {
@@ -71,6 +74,7 @@ app.post("/convert", (req, res) => {
   });
 
   ffmpeg.on("close", (code, signal) => {
+    finished = true;
     if (code !== 0 || bytesSent === 0) {
       if (!headersSet && !res.headersSent) {
         const lines = stderrLog.trim().split("\n").map((l) => l.trim()).filter(Boolean);
@@ -83,8 +87,10 @@ app.post("/convert", (req, res) => {
     }
   });
 
-  req.on("close", () => {
-    ffmpeg.kill("SIGKILL");
+  res.on("close", () => {
+    if (!finished && !res.writableFinished) {
+      ffmpeg.kill("SIGTERM");
+    }
   });
 });
 
