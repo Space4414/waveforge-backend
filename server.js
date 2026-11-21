@@ -20,6 +20,8 @@ app.post("/convert", (req, res) => {
   const allowedBitrates = ["128k", "256k", "320k"];
   const safeBitrate = allowedBitrates.includes(bitrate) ? bitrate : "128k";
 
+  console.log("POST /convert received:", sourceUrl, safeBitrate);
+
   if (!sourceUrl || !/^https?:\/\//i.test(sourceUrl)) {
     return res.status(400).json({ error: "Provide a valid http/https direct audio sourceUrl" });
   }
@@ -66,6 +68,7 @@ app.post("/convert", (req, res) => {
 
   ffmpeg.on("error", (err) => {
     finished = true;
+    console.error("ffmpeg spawn error:", err.message);
     if (!headersSet && !res.headersSent) {
       res.status(500).json({ error: `Failed to start ffmpeg: ${err.message}` });
     } else if (!res.writableEnded) {
@@ -75,6 +78,7 @@ app.post("/convert", (req, res) => {
 
   ffmpeg.on("close", (code, signal) => {
     finished = true;
+    console.log(`ffmpeg closed: code=${code}, signal=${signal}, bytesSent=${bytesSent}`);
     if (code !== 0 || bytesSent === 0) {
       if (!headersSet && !res.headersSent) {
         const lines = stderrLog.trim().split("\n").map((l) => l.trim()).filter(Boolean);
@@ -87,8 +91,9 @@ app.post("/convert", (req, res) => {
     }
   });
 
-  res.on("close", () => {
-    if (!finished && !res.writableFinished) {
+  req.on("aborted", () => {
+    if (!finished) {
+      console.log("Client aborted request; stopping ffmpeg");
       ffmpeg.kill("SIGTERM");
     }
   });
